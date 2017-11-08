@@ -93,7 +93,7 @@
 -type options() :: [option()].
 
 
--record(state, {tasks = [], is_leader = false}).
+-record(state, {tasks = #{}, is_leader = false}).
 
 %%%===================================================================
 %%% API
@@ -219,7 +219,7 @@ task_status(Ident) ->
 %% @end
 %%--------------------------------------------------------------------
 
--spec task_list() -> [task()].
+-spec task_list() -> #{ident() => task()}.
 
 task_list() ->
     gen_leader:leader_call(?SERVER, task_list).
@@ -274,42 +274,34 @@ surrendered(State, Sync, _Election) ->
     {ok, State3}.
 
 %% @private
-handle_leader_call({cancel, Name}, From, State, Election) when
-      is_binary(Name); is_atom(Name) ->
-    case pid_for_name(Name, State#state.tasks) of
-        {error, Reason} ->
-            {reply, {error, Reason}, State};
-        Pid ->
-            handle_leader_call({cancel, Pid}, From, State, Election)
-    end;
-handle_leader_call({cancel, Pid}, _From, State, Election) ->
+handle_leader_call({cancel, Name}, _From, State, Election) ->
     Tasks = State#state.tasks,
-    {Reply, State1} = case lists:keyfind(Pid, 2, Tasks) of
-			  false ->
+    {Reply, State1} = case maps:get(Name, Tasks, undefined) of
+			  undefined ->
 			      {{error, no_such_pid}, State};
-			  {_, Pid, _, _} ->
+			  {Pid, _, _} ->
 			      ok = leader_cron_task:stop(Pid),
-			      Tasks1 = lists:keydelete(Pid, 2, Tasks),
+			      Tasks1 = maps:remove(Name, Tasks),
 			      send_tasks(Tasks1, Election),
 			      {ok, State#state{tasks = Tasks1}}
 		      end,
     {reply, Reply, State1};
 handle_leader_call({schedule, {Name, Schedule, Exec}}, _From, State, Election) ->
-    case not (Name == undefined)
-	andalso lists:keymember(Name, 1, State#state.tasks) of
-        true ->
-            {reply, {error, already_exists}, State};
-        false ->
+    case maps:get(Name, State#state.tasks, undefined) of
+        undefined ->
             case leader_cron_task:start_link(Schedule, Exec) of
                 {ok, Pid} ->
-                    Task = {Name, Pid, Schedule, Exec},
-                    TaskList = [Task|State#state.tasks],
-                    State1 = State#state{tasks = TaskList},
-                    ok = send_tasks(TaskList, Election),
+                    Name1 = name_or_pid(Name, Pid),
+                    Task = {Pid, Schedule, Exec},
+                    Tasks = State#state.tasks,
+                    State1 = State#state{tasks = Tasks#{Name1 => Task}},
+                    ok = send_tasks(Tasks, Election),
                     {reply, {ok, Pid}, State1};
                 {error, Reason} ->
                     {reply, {error, Reason}, State}
-            end
+            end;
+        _ ->
+            {reply, {error, already_exists}, State}
     end;
 handle_leader_call({task_status, Name}, From, State, Election) when
       is_binary(Name); is_atom(Name) ->
@@ -327,7 +319,7 @@ handle_leader_call(task_list, _From, State, _Election) ->
     {reply, Tasks, State};
 handle_leader_call(remove_done_tasks, _From, State, Election) ->
     Tasks = State#state.tasks,
-    Tasks1 = lists:foldl(fun remove_task_if_done/2, [], Tasks),
+    Tasks1 = maps:fold(fun remove_task_if_done/3, #{}, Tasks),
     State1 = State#state{tasks = Tasks1},
     ok = send_tasks(Tasks1, Election),
     {reply, ok, State1}.
@@ -401,49 +393,53 @@ send_tasks(Tasks, Election) ->
 
 stop_tasks(State) ->
     Tasks = State#state.tasks,
-    Tasks1 = lists:foldl(fun({Name, Pid, Schedule, Exec}, Acc) ->
-				 ok = leader_cron_task:stop(Pid),
-				 [{Name, undefined, Schedule, Exec}|Acc]
-			 end, [], Tasks),
+    Tasks1 = maps:fold(fun(Name, {Pid, Schedule, Exec}, Acc) ->
+                 ok = leader_cron_task:stop(Pid),
+                 Acc#{Name => {undefined, Schedule, Exec}}
+			 end, #{}, Tasks),
     State#state{tasks = Tasks1}.
 
 -spec start_tasks(#state{}) -> #state{}.
 
 start_tasks(State) ->
-    TaskList = State#state.tasks,
-    TaskList1 = lists:foldl(
-	     fun(Task, Acc) ->
-                    {Name, _, Schedule, Exec} = Task,
+    Tasks = State#state.tasks,
+    Tasks1 = maps:fold(
+	     fun(Name, Task, Acc) ->
+                    {_, Schedule, Exec} = Task,
                     case leader_cron_task:start_link(Schedule, Exec) of
                         {ok, Pid} ->
-                            [{Name, Pid, Schedule, Exec}|Acc];
+                            Acc#{Name => {Pid, Schedule, Exec}};
                         {error, Reason} ->
                             Format = "Could not start task ~p ~p, name: ~p",
-                            Message = io_lib:format(Format,
-						    [Exec, Reason, Name]),
+                            Message = io_lib:format(Format, [Exec, Reason, Name]),
                             error_logger:error_report(Message),
-                            [{Name, undefined, Schedule, Exec}|Acc]
+                            Acc#{Name => {undefined, Schedule, Exec}}
                     end
-	     end, [], TaskList),
-    State#state{tasks = TaskList1}.
+	     end, #{}, Tasks),
+    State#state{tasks = Tasks1}.
 
-remove_task_if_done(Task, Acc) ->
-    {_, Pid, _, _} = Task,
+remove_task_if_done(Name, Task, Acc) ->
+    {Pid, _, _} = Task,
     case leader_cron_task:status(Pid) of
 	{done, _, _} ->
 	    ok = leader_cron_task:stop(Pid),
 	    Acc;
 	_ ->
-	    [Task|Acc]
+	    Acc#{Name => Task}
     end.
 
 pid_for_name(Name, Tasks) ->
-    case lists:keyfind(Name, 1, Tasks) of
+    case maps:get(Name, Tasks) of
         false ->
             {error, no_such_name};
-        {_, Pid, _, _} ->
+        {Pid, _, _} ->
             Pid
     end.
+
+name_or_pid(undefined, Pid) ->
+    Pid;
+name_or_pid(Name, _Pid) ->
+    Name.
 
 %%%===================================================================
 %%% Unit Tests
@@ -472,8 +468,8 @@ all_test_() ->
     {foreach,
      fun() ->
          leader_cron:start_link([node()]),
-	     Tasks = leader_cron:task_list(),
-	     lists:foreach(fun({_, Pid, _, _}) ->
+	     Tasks = maps:to_list(leader_cron:task_list()),
+	     lists:foreach(fun({_, {Pid, _, _}}) ->
 				   ok = leader_cron:cancel_task(Pid)
 			   end, Tasks)
      end,
@@ -493,11 +489,11 @@ test_single_node_task() ->
     {running, _, TaskPid} = leader_cron:task_status(SchedulerPid),
     TaskPid ! go,
     ?assertMatch({waiting, _, TaskPid}, leader_cron:task_status(SchedulerPid)),
-    ?assertEqual([{undefined, SchedulerPid, Schedule, Exec}],
-		 leader_cron:task_list()),
+    ?assertEqual([{SchedulerPid, {SchedulerPid, Schedule, Exec}}],
+		 maps:to_list(leader_cron:task_list())),
     ?assertEqual(true, is_process_alive(TaskPid)),
     ?assertEqual(ok, leader_cron:cancel_task(SchedulerPid)),
-    ?assertEqual([], leader_cron:task_list()),
+    ?assertEqual([], maps:to_list(leader_cron:task_list())),
     ?assertEqual(false, is_process_alive(TaskPid)).
 
 test_dying_task() ->
@@ -513,10 +509,10 @@ test_done_task_removal() ->
     Exec = {timer, sleep, [1]},
     {ok, Pid} = leader_cron:schedule_task(Schedule, Exec),
     timer:sleep(5),
-    ?assertMatch([_], leader_cron:task_list()),
+    ?assertMatch([_], maps:to_list(leader_cron:task_list())),
     ?assertMatch({done, _, _}, leader_cron:task_status(Pid)),
     ?assertEqual(ok, leader_cron:remove_done_tasks()),
-    ?assertEqual([], leader_cron:task_list()).
+    ?assertEqual([], maps:to_list(leader_cron:task_list())).
 
 test_single_named_task_with_atom_name() ->
     test_single_named_task(test_task).
@@ -535,11 +531,11 @@ test_single_named_task(Name) ->
     {running, _, TaskPid} = leader_cron:task_status(Name),
     TaskPid ! go,
     ?assertMatch({waiting, _, TaskPid}, leader_cron:task_status(Name)),
-    ?assertEqual([{Name, SchedulerPid, Schedule, Exec}],
-		 leader_cron:task_list()),
+    ?assertEqual([{Name, {SchedulerPid, Schedule, Exec}}],
+		 maps:to_list(leader_cron:task_list())),
     ?assertEqual(true, is_process_alive(TaskPid)),
     ?assertEqual(ok, leader_cron:cancel_task(Name)),
-    ?assertEqual([], leader_cron:task_list()),
+    ?assertEqual([], maps:to_list(leader_cron:task_list())),
     ?assertEqual(false, is_process_alive(TaskPid)).
 
 -endif.
