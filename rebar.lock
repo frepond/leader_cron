@@ -1,0 +1,4 @@
+[{<<"gen_leader">>,
+  {git,"git://github.com/jeraymond/gen_leader_revival.git",
+       {ref,"a119cb9a39f94254247962bce4616b6f607cca80"}},
+  0}].

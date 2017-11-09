@@ -135,7 +135,7 @@
 -type listspec() :: {list, Values :: [integer()]} | [integer()] | integer().
 %% Represents a cron list (e.g. 1,3,7)
 
--type status() :: waiting | running | done | error.
+-type status() :: waiting | running | done | error | undefined.
 %% Task execution status.
 
 -type execargs() :: mfargs() | funcargs().
@@ -498,13 +498,13 @@ extract_integers(Spec, Min, Max, Acc) ->
 -define(LONG_SLEEP_TIME, 100000000).
 
 sleep_accounting_for_max(TimeInMillis) ->
-       case (TimeInMillis > ?LONG_SLEEP_TIME) of 
+       case (TimeInMillis > ?LONG_SLEEP_TIME) of
 	       true -> timer:sleep(TimeInMillis rem ?LONG_SLEEP_TIME), long_sleep(TimeInMillis div ?LONG_SLEEP_TIME);
 	       false -> timer:sleep(TimeInMillis)
        end.
 
 long_sleep(0) -> ok;
-long_sleep(Chunks) -> 
+long_sleep(Chunks) ->
 	timer:sleep(?LONG_SLEEP_TIME),
 	long_sleep(Chunks - 1).
 

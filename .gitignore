@@ -9,3 +9,4 @@ doc
 *.beam
 xref_warnings
 dialyzer_warnings
+_build
