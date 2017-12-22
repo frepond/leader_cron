@@ -10,3 +10,5 @@ doc
 xref_warnings
 dialyzer_warnings
 _build
+.tool-versions
+leader_cron*@*
