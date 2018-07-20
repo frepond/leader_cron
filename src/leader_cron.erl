@@ -282,7 +282,7 @@ handle_leader_call({cancel, Name}, _From, State, Election) ->
 			  {Pid, _, _} = Task ->
 			      ok = leader_cron_task:stop(Pid),
 			      Tasks1 = maps:remove(Name, Tasks),
-			      ok = send_tasks({Name, Task}, Election),
+			      ok = send_remove_task({Name, Task}, Election),
 			      {ok, State#state{tasks = Tasks1}}
 		      end,
     {reply, Reply, State1};
@@ -295,7 +295,7 @@ handle_leader_call({schedule, {Name, Schedule, Exec}}, _From, State, Election) -
                     Task = {Pid, Schedule, Exec},
                     Tasks = State#state.tasks,
                     State1 = State#state{tasks = Tasks#{Name1 => Task}},
-                    ok = send_tasks({Name, Task}, Election),
+                    ok = send_add_task({Name, Task}, Election),
                     {reply, {ok, Pid}, State1};
                 {error, Reason} ->
                     {reply, {error, Reason}, State}
@@ -329,9 +329,15 @@ handle_leader_cast(_Request, State, _Election) ->
     {noreply, State}.
 
 %% @private
-from_leader({tasks, {Name, Task}}, State, _Election) ->
+from_leader({add_task, {Name, Task}}, State, _Election) ->
     Tasks = State#state.tasks,
     State1 = save_tasks(State, Tasks#{Name => Task}),
+    {ok, State1};
+
+from_leader({remove_task, {Name, Task}}, State, _Election) ->
+    Tasks = State#state.tasks,
+    Tasks1 = maps:remove(Name, Tasks),
+    State1 = save_tasks(State, Tasks1),
     {ok, State1}.
 
 %% @private
@@ -375,16 +381,31 @@ code_change(_OldVsn, State, _Election, _Extra) ->
 save_tasks(State, Tasks) ->
     State#state{tasks = Tasks}.
 
--spec send_tasks(Tasks, Election) -> ok when
+-spec send_add_task(Tasks, Election) -> ok when
       Tasks :: {ident(), task()},
       Election :: term().
 
-send_tasks(Task, Election) ->
+send_add_task(Task, Election) ->
     case gen_leader:alive(Election) -- [node()] of
 	[] ->
 	    ok;
 	Alive ->
-	    Election = gen_leader:broadcast({from_leader, {tasks, Task}},
+	    Election = gen_leader:broadcast({from_leader, {add_task, Task}},
+					    Alive,
+					    Election),
+	    ok
+    end.
+
+-spec send_remove_task(Tasks, Election) -> ok when
+      Tasks :: {ident(), task()},
+      Election :: term().
+
+send_remove_task(Task, Election) ->
+    case gen_leader:alive(Election) -- [node()] of
+	[] ->
+	    ok;
+	Alive ->
+	    Election = gen_leader:broadcast({from_leader, {remove_task, Task}},
 					    Alive,
 					    Election),
 	    ok
@@ -424,7 +445,7 @@ remove_task_if_done(Name, Task, Acc, Election) ->
     case leader_cron_task:status(Pid) of
 	{done, _, _} ->
         ok = leader_cron_task:stop(Pid),
-        ok = send_tasks({Name, Task}, Election),
+        ok = send_remove_task({Name, Task}, Election),
 	    Acc;
 	_ ->
 	    Acc#{Name => Task}
